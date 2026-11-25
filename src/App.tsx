@@ -10,22 +10,25 @@ import { CopilotProPage } from './pages/CopilotProPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { ModelsPage } from './pages/ModelsPage';
 import { ProvidersPage } from './pages/ProvidersPage';
-import { SettingsPage } from './pages/SettingsPage';
+import { SettingsPage, type SettingsTab } from './pages/SettingsPage';
 import { UsagePage } from './pages/UsagePage';
 import {
   activateProviderKey,
+  addCustomPcTool,
   addProviderKey,
   applyCatalogUpdates,
   checkCatalogUpdates,
   clearUsageLogs,
   createCustomProvider,
   deleteChatSession,
+  deleteCustomPcTool,
   deleteCustomProvider,
   deleteProviderKey,
   deleteProviderKeyById,
   downloadSourceBackupArchive,
   exportConfigBundle,
   fetchBootstrap,
+  fetchPcTools,
   fetchSourceBackupManifest,
   generateGatewayToken,
   importConfigBundle,
@@ -48,11 +51,14 @@ import type {
   ChatSession,
   GatewayStatus,
   ModelInfo,
+  PcDiscoverySnapshot,
+  PcToolCategory,
   PublicProviderConfig,
   SourceBackupManifest,
   SourceBackupSettings,
   UsageRecord,
 } from './types/ai';
+import { getDefaultPcAccessClient } from './utils/pcActions';
 
 export default function App() {
   const [section, setSection] = useState<NavSection>('dashboard');
@@ -78,6 +84,9 @@ export default function App() {
   const [loadingSourceManifest, setLoadingSourceManifest] = useState(false);
   const [savingSourceBackup, setSavingSourceBackup] = useState(false);
   const autoBackupPromptedRef = useRef(false);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>('all');
+  const [pcDiscovery, setPcDiscovery] = useState<PcDiscoverySnapshot | null>(null);
+  const [scanningPcTools, setScanningPcTools] = useState(false);
   const [settings, setSettings] = useState<AppSettings>({
     theme: 'dark',
     activeProviderId: 'openrouter',
@@ -97,6 +106,7 @@ export default function App() {
       localPath: '',
       fileNamePrefix: 'free-ai-hub-source',
     },
+    pcAccess: getDefaultPcAccessClient(),
   });
 
   const showToast = useCallback((type: 'info' | 'error', message: string) => {
@@ -164,6 +174,11 @@ export default function App() {
         if (data.catalog) {
           setCatalogMeta(data.catalog);
         }
+        void fetchPcTools(false)
+          .then((res) => {
+            if (active) setPcDiscovery(res.snapshot);
+          })
+          .catch(() => {});
         const sb = data.settings.sourceBackup;
         if (sb?.autoEnabled && !autoBackupPromptedRef.current) {
           const intervalMs = Math.max(0, sb.intervalHours) * 3600_000;
@@ -256,6 +271,9 @@ export default function App() {
       smartRouter: partial.smartRouter
         ? { ...settings.smartRouter, ...partial.smartRouter }
         : settings.smartRouter,
+      pcAccess: partial.pcAccess
+        ? { ...getDefaultPcAccessClient(), ...settings.pcAccess, ...partial.pcAccess }
+        : settings.pcAccess,
     };
     setSettings(optimistic);
     try {
@@ -264,6 +282,45 @@ export default function App() {
     } catch (err) {
       showToast('error', err instanceof Error ? err.message : 'Errore salvataggio impostazioni.');
     }
+  };
+
+  const handleRefreshPcTools = async () => {
+    setScanningPcTools(true);
+    try {
+      const res = await fetchPcTools(true);
+      setPcDiscovery(res.snapshot);
+      showToast(
+        'info',
+        `Scansione PC completata: ${res.snapshot.availableCount} strumenti disponibili.`,
+      );
+    } catch (err) {
+      showToast(
+        'error',
+        err instanceof Error ? err.message : 'Errore scansione strumenti PC.',
+      );
+    } finally {
+      setScanningPcTools(false);
+    }
+  };
+
+  const handleAddCustomPcTool = async (payload: {
+    name: string;
+    executable: string;
+    category: PcToolCategory;
+    isGui: boolean;
+    description?: string;
+  }) => {
+    const res = await addCustomPcTool(payload);
+    setSettings(res.settings);
+    setPcDiscovery(res.snapshot);
+    showToast('info', `Applicazione "${payload.name}" aggiunta alle risorse PC.`);
+  };
+
+  const handleDeleteCustomPcTool = async (id: string) => {
+    const res = await deleteCustomPcTool(id);
+    setSettings(res.settings);
+    setPcDiscovery(res.snapshot);
+    showToast('info', 'Applicazione personalizzata rimossa.');
   };
 
   const handleSaveProviderConfig = async (
@@ -601,7 +658,10 @@ export default function App() {
     <div className="min-h-screen flex bg-zinc-50 dark:bg-zinc-950 text-zinc-950 dark:text-zinc-50">
       <Sidebar
         activeSection={section}
-        onSelectSection={setSection}
+        onSelectSection={(next) => {
+          if (next === 'settings') setSettingsTab('all');
+          setSection(next);
+        }}
         theme={settings.theme}
         onToggleTheme={() =>
           void handleUpdateSettings({
@@ -670,6 +730,7 @@ export default function App() {
                   models={models}
                   settings={settings}
                   sessions={chatSessions}
+                  pcDiscovery={pcDiscovery}
                   onUpdateSettings={handleUpdateSettings}
                   onUpdateSessionLocal={handleUpdateSessionLocal}
                   onSaveSession={handleSaveSession}
@@ -681,6 +742,10 @@ export default function App() {
                     if (nextLogs) setUsageLogs(nextLogs);
                   }}
                   onNavigate={setSection}
+                  onOpenPcAccessSettings={() => {
+                    setSettingsTab('pc');
+                    setSection('settings');
+                  }}
                 />
               )}
               {section === 'copilot' && (
@@ -731,6 +796,12 @@ export default function App() {
                   gateway={gateway}
                   catalogMeta={catalogMeta}
                   checkingUpdates={checkingUpdates}
+                  pcDiscovery={pcDiscovery}
+                  scanningPcTools={scanningPcTools}
+                  initialTab={settingsTab}
+                  onRefreshPcTools={handleRefreshPcTools}
+                  onAddCustomPcTool={handleAddCustomPcTool}
+                  onDeleteCustomPcTool={handleDeleteCustomPcTool}
                   onCheckUpdates={() => void handleCheckCatalogUpdates('manual')}
                   onOpenSourceBackup={() => openSourceBackupModal('manual')}
                   onUpdateSettings={handleUpdateSettings}

@@ -10,6 +10,7 @@ import type {
   PublicProviderConfig,
   UsageRecord,
 } from '../src/types/ai.ts';
+import { getDefaultPcAccessSettings, sanitizePcAccessSettings } from './pcToolsService.ts';
 import { getProviderSecrets, getPublicProviderKeys, maskApiKey } from './vault.ts';
 
 const DATA_DIR = path.resolve(process.cwd(), '.free-ai-hub-data');
@@ -248,6 +249,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     localPath: '',
     fileNamePrefix: 'free-ai-hub-source',
   },
+  pcAccess: getDefaultPcAccessSettings(),
 };
 
 function ensureDataDir(): void {
@@ -391,6 +393,7 @@ export function loadState(): PersistedState {
         ...structuredClone(DEFAULT_SETTINGS.sourceBackup!),
         ...(parsed.settings?.sourceBackup ?? {}),
       },
+      pcAccess: sanitizePcAccessSettings(parsed.settings?.pcAccess, getDefaultPcAccessSettings()),
     };
     // Ensure priority list only references active providers and includes newly added ones
     const providerIds = new Set(providers.map((p) => p.id));

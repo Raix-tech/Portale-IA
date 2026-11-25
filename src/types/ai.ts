@@ -176,6 +176,85 @@ export interface SourceBackupManifest {
   files: Array<{ relativePath: string; size: number }>;
 }
 
+export type PcAccessMode = 'none' | 'limited' | 'custom' | 'full';
+
+export type PcToolCategory =
+  | 'terminal'
+  | 'python'
+  | 'node'
+  | 'git'
+  | 'ide'
+  | 'office'
+  | 'browser'
+  | 'cli'
+  | 'desktop'
+  | 'custom';
+
+export type PcToolCustomGroup =
+  | 'powershell'
+  | 'python'
+  | 'office'
+  | 'browser'
+  | 'git'
+  | 'vscode'
+  | 'other';
+
+export interface PcDiscoveredTool {
+  id: string;
+  name: string;
+  category: PcToolCategory;
+  customGroup: PcToolCustomGroup;
+  executable: string;
+  path?: string;
+  source: 'builtin' | 'path' | 'desktop' | 'custom';
+  available: boolean;
+  version?: string;
+  isGui?: boolean;
+  supportsScripts?: boolean;
+  description?: string;
+}
+
+export interface PcCustomToolDefinition {
+  id: string;
+  name: string;
+  executable: string;
+  category: PcToolCategory;
+  isGui?: boolean;
+  description?: string;
+}
+
+export interface PcAccessSettings {
+  mode: PcAccessMode;
+  allowAllInstalled: boolean;
+  allowedGroups: Record<PcToolCustomGroup, boolean>;
+  disabledToolIds: string[];
+  enabledToolIds: string[];
+  customTools: PcCustomToolDefinition[];
+}
+
+export interface PcDiscoverySnapshot {
+  platform: string;
+  hostname: string;
+  scannedAt: string;
+  tools: PcDiscoveredTool[];
+  availableCount: number;
+  pathCount: number;
+  desktopCount: number;
+}
+
+export interface PcExecuteResult {
+  ok: boolean;
+  toolId: string;
+  toolName: string;
+  commandDisplay: string;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  launchedGui?: boolean;
+  durationMs: number;
+  error?: string;
+}
+
 export interface AppSettings {
   theme: 'light' | 'dark';
   activeProviderId: string;
@@ -184,6 +263,7 @@ export interface AppSettings {
   systemPrompt: string;
   autoUpdateCatalogOnLogin?: boolean;
   sourceBackup?: SourceBackupSettings;
+  pcAccess?: PcAccessSettings;
 }
 
 export interface UsageRecord {

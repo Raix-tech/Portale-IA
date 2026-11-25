@@ -14,6 +14,9 @@ import type {
   GatewayStatus,
   ModelInfo,
   NormalizedAIError,
+  PcDiscoverySnapshot,
+  PcExecuteResult,
+  PcToolCategory,
   PublicProviderConfig,
   SourceBackupManifest,
   TaskCategory,
@@ -335,6 +338,56 @@ export async function downloadSourceBackupArchive(fileName: string): Promise<{
   const fileCount = Number(res.headers.get('X-Backup-File-Count') || '0');
   const blob = await res.blob();
   return { blob, fileCount };
+}
+
+export async function fetchPcTools(refresh = false): Promise<{ snapshot: PcDiscoverySnapshot }> {
+  const query = refresh ? '?refresh=1' : '';
+  const res = await fetch(`/api/pc/tools${query}`, { cache: 'no-store' });
+  return parseJsonOrThrow(res);
+}
+
+export async function addCustomPcTool(payload: {
+  name: string;
+  executable: string;
+  category?: PcToolCategory;
+  isGui?: boolean;
+  description?: string;
+}): Promise<{ settings: AppSettings; snapshot: PcDiscoverySnapshot }> {
+  const res = await fetch('/api/pc/custom-tool', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    cache: 'no-store',
+  });
+  return parseJsonOrThrow(res);
+}
+
+export async function deleteCustomPcTool(
+  id: string,
+): Promise<{ settings: AppSettings; snapshot: PcDiscoverySnapshot }> {
+  const res = await fetch(`/api/pc/custom-tool/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    cache: 'no-store',
+  });
+  return parseJsonOrThrow(res);
+}
+
+export async function executePcTool(payload: {
+  toolId?: string;
+  toolQuery?: string;
+  command?: string;
+  args?: string[];
+  script?: string;
+  workingDirectory?: string;
+  confirmedByUser: boolean;
+}): Promise<PcExecuteResult> {
+  const res = await fetch('/api/pc/execute', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    cache: 'no-store',
+  });
+  return parseJsonOrThrow(res);
 }
 
 export async function generateGatewayToken(): Promise<{ gateway: GatewayStatus }> {

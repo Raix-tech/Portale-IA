@@ -9,6 +9,7 @@ import {
   FolderOpen,
   ImagePlus,
   KeyRound,
+  Laptop,
   MessageSquarePlus,
   PanelLeftClose,
   PanelLeftOpen,
@@ -21,12 +22,13 @@ import {
   X,
 } from 'lucide-react';
 import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { PcActionCard, type PcActionDecision } from '../components/PcActionCard';
 import { ProviderIcon } from '../components/ProviderIcon';
 import {
   WorkspaceActionCard,
   type WorkspaceActionDecision,
 } from '../components/WorkspaceActionCard';
-import { streamChat } from '../services/apiClient';
+import { executePcTool, streamChat } from '../services/apiClient';
 import {
   authorizeWorkspaceFolder,
   buildWorkspaceSystemPrompt,
@@ -48,13 +50,20 @@ import type {
   FallbackAttempt,
   ModelInfo,
   NormalizedAIError,
+  PcDiscoverySnapshot,
   PublicProviderConfig,
   TaskCategory,
   UsageRecord,
 } from '../types/ai';
 import { MarkdownContent } from '../utils/markdown';
 import {
-  parseWorkspaceActions,
+  buildPcToolsSystemPrompt,
+  getDefaultPcAccessClient,
+  isPcToolAuthorizedClient,
+  parseAllChatActions,
+  type PcExecRequest,
+} from '../utils/pcActions';
+import {
   type WorkspaceConnectRequest,
   type WorkspaceReadRequest,
   type WorkspaceWriteRequest,
@@ -66,6 +75,7 @@ interface ChatPageProps {
   models: ModelInfo[];
   settings: AppSettings;
   sessions: ChatSession[];
+  pcDiscovery: PcDiscoverySnapshot | null;
   onUpdateSettings: (partial: Partial<AppSettings>) => Promise<void>;
   onUpdateSessionLocal: (session: ChatSession) => void;
   onSaveSession: (session: ChatSession) => Promise<void>;
@@ -74,6 +84,7 @@ interface ChatPageProps {
   onActivateProviderKey: (providerId: string, keyId: string) => Promise<void>;
   onSyncAfterChat: (providers?: PublicProviderConfig[], usageLogs?: UsageRecord[]) => void;
   onNavigate: (section: NavSection) => void;
+  onOpenPcAccessSettings: () => void;
 }
 
 const TASK_CATEGORIES: Array<{ id: TaskCategory; label: string }> = [
@@ -100,6 +111,7 @@ export function ChatPage({
   models,
   settings,
   sessions,
+  pcDiscovery,
   onUpdateSettings,
   onUpdateSessionLocal,
   onSaveSession,
@@ -108,6 +120,7 @@ export function ChatPage({
   onActivateProviderKey,
   onSyncAfterChat,
   onNavigate,
+  onOpenPcAccessSettings,
 }: ChatPageProps) {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(
     sessions[0]?.id ?? null,
@@ -137,6 +150,7 @@ export function ChatPage({
   const [actionDecisions, setActionDecisions] = useState<Record<string, WorkspaceActionDecision>>(
     {},
   );
+  const [pcDecisions, setPcDecisions] = useState<Record<string, PcActionDecision>>({});
 
   const abortRef = useRef<AbortController | null>(null);
   const latestStreamingSessionRef = useRef<ChatSession | null>(null);
@@ -198,6 +212,12 @@ export function ChatPage({
     if (!q) return workspace.files;
     return workspace.files.filter((f) => f.path.toLowerCase().includes(q));
   }, [workspace.files, pcFileSearch]);
+
+  const pcAccess = settings.pcAccess ?? getDefaultPcAccessClient();
+  const authorizedPcToolsCount = useMemo(
+    () => (pcDiscovery?.tools ?? []).filter((t) => isPcToolAuthorizedClient(t, pcAccess)).length,
+    [pcDiscovery?.tools, pcAccess],
+  );
 
   useEffect(() => {
     void restoreWorkspaceSnapshot().then(setWorkspace);
@@ -520,10 +540,13 @@ export function ChatPage({
           providerId: settings.activeProviderId,
           modelId: effectiveModelId,
           taskCategory: settings.smartRouter.taskCategory,
-          systemPrompt: buildWorkspaceSystemPrompt(
-            settings.systemPrompt,
-            overrideWorkspace ?? workspace,
-          ),
+          systemPrompt: [
+            buildWorkspaceSystemPrompt(
+              settings.systemPrompt,
+              overrideWorkspace ?? workspace,
+            ),
+            buildPcToolsSystemPrompt(settings.pcAccess, pcDiscovery),
+          ].join('\n\n'),
           messages: historyForApi,
         },
         {
@@ -733,6 +756,65 @@ export function ChatPage({
 
   const handleRejectAction = (actionId: string) => {
     setActionDecisions((prev) => ({
+      ...prev,
+      [actionId]: {
+        status: 'rejected',
+      },
+    }));
+  };
+
+  const handleAuthorizePcExec = async (
+    action: PcExecRequest,
+    workingDirectoryOverride?: string,
+  ) => {
+    try {
+      const result = await executePcTool({
+        toolId: action.toolId,
+        toolQuery: action.toolQuery,
+        command: action.command,
+        script: action.script,
+        workingDirectory: workingDirectoryOverride ?? action.workingDirectory,
+        confirmedByUser: true,
+      });
+
+      setPcDecisions((prev) => ({
+        ...prev,
+        [action.id]: {
+          status: result.ok ? 'approved' : 'error',
+          message: result.launchedGui
+            ? `${result.toolName} avviato sul PC.`
+            : result.ok
+              ? `Comando completato (exit code ${result.exitCode ?? 0}, ${result.durationMs} ms).`
+              : result.error || `Terminato con exit code ${result.exitCode ?? '?'}.`,
+          result,
+        },
+      }));
+
+      const sections = [
+        `Ho autorizzato ed eseguito sul mio PC: \`${result.commandDisplay}\` (strumento: ${result.toolName})`,
+        `Esito: ${result.ok ? 'Completato' : 'Errore'} (exit code: ${result.exitCode ?? 'n/d'}, durata: ${result.durationMs} ms)`,
+      ];
+      if (result.stdout) {
+        sections.push(`STDOUT:\n\`\`\`\n${result.stdout}\n\`\`\``);
+      }
+      if (result.stderr) {
+        sections.push(`STDERR:\n\`\`\`\n${result.stderr}\n\`\`\``);
+      }
+      sections.push("Analizza l'esito reale e procedi con la risposta.");
+      await sendChatPrompt(sections.join('\n\n'), [], false);
+    } catch (err) {
+      setPcDecisions((prev) => ({
+        ...prev,
+        [action.id]: {
+          status: 'error',
+          message: err instanceof Error ? err.message : 'Esecuzione sul PC negata o fallita.',
+        },
+      }));
+    }
+  };
+
+  const handleRejectPcAction = (actionId: string) => {
+    setPcDecisions((prev) => ({
       ...prev,
       [actionId]: {
         status: 'rejected',
@@ -1084,6 +1166,31 @@ export function ChatPage({
               </button>
             )}
 
+            <button
+              type="button"
+              onClick={onOpenPcAccessSettings}
+              title="Configura permessi esecuzione app e comandi sul PC"
+              className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap ${
+                pcAccess.mode === 'none'
+                  ? 'border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+                  : 'border-indigo-200 dark:border-indigo-900/70 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-800 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/40'
+              }`}
+            >
+              <Laptop className="w-3.5 h-3.5 shrink-0" />
+              <span className="hidden sm:inline">
+                {pcAccess.mode === 'none'
+                  ? 'App PC: Nessun accesso'
+                  : pcAccess.mode === 'full'
+                    ? `App PC: Completo (${authorizedPcToolsCount})`
+                    : pcAccess.mode === 'custom'
+                      ? `App PC: Personalizzato (${authorizedPcToolsCount})`
+                      : `App PC: Limitato (${authorizedPcToolsCount})`}
+              </span>
+              <span className="sm:hidden">
+                {pcAccess.mode === 'none' ? 'PC Off' : `PC (${authorizedPcToolsCount})`}
+              </span>
+            </button>
+
             <div className="hidden lg:flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400 shrink-0 pl-1">
               <span>Fallback:</span>
               <span className="font-medium text-zinc-800 dark:text-zinc-200">
@@ -1187,9 +1294,21 @@ export function ChatPage({
 
                       {msg.content ? (
                         <div className="space-y-1">
-                          {parseWorkspaceActions(msg.id, msg.content).map((segment, segIdx) =>
+                          {parseAllChatActions(msg.id, msg.content).map((segment, segIdx) =>
                             segment.type === 'markdown' ? (
                               <MarkdownContent key={`${msg.id}:md:${segIdx}`} content={segment.content} />
+                            ) : segment.type === 'pc-exec' ? (
+                              <PcActionCard
+                                key={segment.id}
+                                action={segment}
+                                pcAccess={pcAccess}
+                                discovery={pcDiscovery}
+                                isStreaming={isStreaming}
+                                decision={pcDecisions[segment.id]}
+                                onAuthorizeExec={handleAuthorizePcExec}
+                                onReject={handleRejectPcAction}
+                                onOpenPcAccessSettings={onOpenPcAccessSettings}
+                              />
                             ) : (
                               <WorkspaceActionCard
                                 key={segment.id}

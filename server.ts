@@ -36,6 +36,12 @@ import {
   applyCatalogAndModelsUpdate,
   checkCatalogAndModelsUpdates,
 } from './server/catalogUpdater.ts';
+import {
+  discoverPcTools,
+  executeAuthorizedPcTool,
+  getDefaultPcAccessSettings,
+  sanitizePcAccessSettings,
+} from './server/pcToolsService.ts';
 import { executeRoutedChat } from './server/router.ts';
 import {
   buildSourceBackupZip,
@@ -244,6 +250,12 @@ async function startServer() {
             ? body.sourceBackup.lastBackupFileName.slice(0, 120)
             : current.lastBackupFileName,
       };
+    }
+    if (body.pcAccess && typeof body.pcAccess === 'object') {
+      state.settings.pcAccess = sanitizePcAccessSettings(
+        body.pcAccess,
+        state.settings.pcAccess ?? getDefaultPcAccessSettings(),
+      );
     }
     saveState(state);
     res.json({ settings: state.settings });
@@ -1194,6 +1206,149 @@ async function startServer() {
     } catch (err) {
       res.status(500).json({
         error: err instanceof Error ? err.message : 'Errore creazione archivio sorgente.',
+      });
+    }
+  });
+
+  // Local PC Tools Discovery, Extensible Registration & User-Authorized Execution
+  app.get('/api/pc/tools', (req, res) => {
+    try {
+      const state = loadState();
+      const pcAccess = state.settings.pcAccess ?? getDefaultPcAccessSettings();
+      const refresh = req.query.refresh === '1' || req.query.refresh === 'true';
+      const snapshot = discoverPcTools(pcAccess, refresh);
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({ snapshot });
+    } catch (err) {
+      res.status(500).json({
+        error:
+          err instanceof Error
+            ? err.message
+            : 'Errore durante il rilevamento delle applicazioni locali.',
+      });
+    }
+  });
+
+  app.post('/api/pc/custom-tool', (req, res) => {
+    try {
+      const state = loadState();
+      const current = state.settings.pcAccess ?? getDefaultPcAccessSettings();
+      const body = (req.body ?? {}) as {
+        name?: string;
+        executable?: string;
+        category?: string;
+        isGui?: boolean;
+        description?: string;
+      };
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      const executable = typeof body.executable === 'string' ? body.executable.trim() : '';
+      if (!name || !executable) {
+        res.status(400).json({ error: 'Nome e comando/percorso eseguibile sono obbligatori.' });
+        return;
+      }
+
+      const id = `custom-${name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/(^-|-$)/g, '')
+        .slice(0, 24) || 'app'}-${crypto.randomUUID().slice(0, 6)}`;
+
+      const nextPcAccess = sanitizePcAccessSettings(
+        {
+          ...current,
+          customTools: [
+            ...current.customTools,
+            {
+              id,
+              name,
+              executable,
+              category: (body.category as 'custom') || 'custom',
+              isGui: Boolean(body.isGui),
+              description: typeof body.description === 'string' ? body.description : undefined,
+            },
+          ],
+          enabledToolIds: Array.from(new Set([...current.enabledToolIds, id])),
+        },
+        current,
+      );
+
+      state.settings.pcAccess = nextPcAccess;
+      saveState(state);
+      const snapshot = discoverPcTools(nextPcAccess, true);
+      res.status(201).json({ settings: state.settings, snapshot });
+    } catch (err) {
+      res.status(400).json({
+        error:
+          err instanceof Error
+            ? err.message
+            : 'Errore registrazione applicazione personalizzata.',
+      });
+    }
+  });
+
+  app.delete('/api/pc/custom-tool/:id', (req, res) => {
+    const state = loadState();
+    const current = state.settings.pcAccess ?? getDefaultPcAccessSettings();
+    const targetId = req.params.id;
+    const exists = current.customTools.some((t) => t.id === targetId);
+    if (!exists) {
+      res.status(404).json({ error: 'Applicazione personalizzata non trovata.' });
+      return;
+    }
+
+    const nextPcAccess = sanitizePcAccessSettings(
+      {
+        ...current,
+        customTools: current.customTools.filter((t) => t.id !== targetId),
+        enabledToolIds: current.enabledToolIds.filter((id) => id !== targetId),
+        disabledToolIds: current.disabledToolIds.filter((id) => id !== targetId),
+      },
+      current,
+    );
+
+    state.settings.pcAccess = nextPcAccess;
+    saveState(state);
+    const snapshot = discoverPcTools(nextPcAccess, true);
+    res.json({ settings: state.settings, snapshot });
+  });
+
+  app.post('/api/pc/execute', async (req, res) => {
+    try {
+      const state = loadState();
+      const pcAccess = state.settings.pcAccess ?? getDefaultPcAccessSettings();
+      const body = (req.body ?? {}) as {
+        toolId?: string;
+        toolQuery?: string;
+        command?: string;
+        args?: string[];
+        script?: string;
+        workingDirectory?: string;
+        confirmedByUser?: boolean;
+      };
+
+      const result = await executeAuthorizedPcTool(
+        {
+          toolId: typeof body.toolId === 'string' ? body.toolId : undefined,
+          toolQuery: typeof body.toolQuery === 'string' ? body.toolQuery : undefined,
+          command: typeof body.command === 'string' ? body.command : undefined,
+          args: Array.isArray(body.args) ? body.args : undefined,
+          script: typeof body.script === 'string' ? body.script : undefined,
+          workingDirectory:
+            typeof body.workingDirectory === 'string' ? body.workingDirectory : undefined,
+          confirmedByUser: body.confirmedByUser === true,
+        },
+        pcAccess,
+      );
+
+      res.setHeader('Cache-Control', 'no-store');
+      res.json(result);
+    } catch (err) {
+      const statusCode =
+        err && typeof err === 'object' && 'statusCode' in err
+          ? Number((err as { statusCode: number }).statusCode) || 400
+          : 400;
+      res.status(statusCode).json({
+        error: err instanceof Error ? err.message : 'Errore esecuzione comando sul PC.',
       });
     }
   });
